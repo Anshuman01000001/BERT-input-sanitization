@@ -1,0 +1,18 @@
+# Model-export dependencies. Installed into the separate .venv-export
+# virtualenv, never into the runtime image.
+#
+#   uv venv --python 3.12 .venv-export
+#   uv pip install --python .venv-export/bin/python torch==2.15.0 \
+#       --index-url https://download.pytorch.org/whl/cpu
+#   uv pip install --python .venv-export/bin/python -r requirements-export.txt
+#   .venv-export/bin/python tools/export_model.py
+#
+# optimum-onnx pins transformers<4.58, which is why this is not the same
+# environment as the runtime one.
+torch==2.15.0
+transformers==4.57.6
+optimum-onnx==0.1.0
+onnx==1.23.2
+onnxruntime==1.32.0
+accelerate==1.15.0
+numpy>=2.0,<3

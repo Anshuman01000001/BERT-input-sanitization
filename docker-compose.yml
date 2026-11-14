@@ -1,0 +1,51 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    command:
+      - redis-server
+      - --requirepass
+      - ${MOD_REDIS_PASSWORD:?set MOD_REDIS_PASSWORD in .env}
+      # No persistence: every key carries a TTL, so losing them only costs
+      # the short-lived stateful heuristics, not any durable record.
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 256mb
+      # Only keys that have a TTL are eligible for eviction, which is every
+      # key this service writes.
+      - --maxmemory-policy
+      - volatile-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${MOD_REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  moderation-api:
+    build:
+      context: .
+    environment:
+      MOD_REDIS_URL: redis://:${MOD_REDIS_PASSWORD:?set MOD_REDIS_PASSWORD in .env}@redis:6379/0
+      # Required, with no fallback: a deployment that forgets the key must
+      # fail loudly rather than run with a public one.
+      MOD_API_KEY: ${MOD_API_KEY:?set MOD_API_KEY in .env}
+      MOD_ONNX_THREADS: ${MOD_ONNX_THREADS:-2}
+      MOD_LOG_LEVEL: ${MOD_LOG_LEVEL:-INFO}
+    ports:
+      - "${MOD_PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Containment: the service needs no privileges and writes no files.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 1g
+    restart: unless-stopped

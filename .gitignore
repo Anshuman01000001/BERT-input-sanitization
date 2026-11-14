@@ -1,0 +1,27 @@
+# Virtualenvs
+.venv/
+.venv-export/
+
+# Build scratch: the float graph lives here, it is not shipped.
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local configuration
+.env
+
+# The quantized model is 105 MB and fully reproducible:
+#   .venv-export/bin/python tools/export_model.py
+models/*.onnx
+
+# Redundant tokenizer files; tokenizer.json is the one the service reads.
+models/vocab.txt
+models/special_tokens_map.json
+models/tokenizer_config.json

@@ -1,0 +1,15 @@
+{
+  "model_id": "unitary/toxic-bert",
+  "labels": [
+    "toxic",
+    "severe_toxic",
+    "obscene",
+    "threat",
+    "insult",
+    "identity_hate"
+  ],
+  "problem_type": "multi_label_classification",
+  "max_seq_len": 128,
+  "quantization": "dynamic_int8",
+  "license": "apache-2.0"
+}

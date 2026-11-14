@@ -1,0 +1,11 @@
+# Runtime dependencies for the moderation API.
+# Deliberately excludes torch/transformers: the image ships a pre-exported,
+# dynamically quantized ONNX model and serves it with onnxruntime only.
+fastapi==0.163.0
+uvicorn[standard]==0.54.0
+onnxruntime==1.32.0
+tokenizers==0.23.3
+redis==8.1.0
+pydantic==2.14.3
+pydantic-settings==2.16.3
+numpy>=2.0,<3

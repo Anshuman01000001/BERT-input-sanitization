@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat moderation demo</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --line: #2a2f3a;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --accent: #6ea8fe;
+    --allow: #4ade80;
+    --flag: #fbbf24;
+    --mute: #fb923c;
+    --block: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  .model { color: var(--muted); font-size: 13px; font-family: ui-monospace, monospace; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, textarea, select, button { font: inherit; color: var(--text); }
+  input, textarea, select {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px;
+  }
+  textarea { resize: vertical; min-height: 76px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  button {
+    background: var(--accent); color: #0b1220; border: 0; border-radius: 8px;
+    padding: 9px 14px; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); font-weight: 500; }
+  button:hover { filter: brightness(1.08); }
+  .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .samples { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .samples button { font-size: 12px; padding: 5px 9px; font-weight: 500; }
+  .verdict { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .badge {
+    font-size: 15px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    padding: 6px 12px; border-radius: 8px; border: 1px solid transparent;
+  }
+  .allow { color: var(--allow); border-color: color-mix(in srgb, var(--allow) 40%, transparent); background: color-mix(in srgb, var(--allow) 12%, transparent); }
+  .flag { color: var(--flag); border-color: color-mix(in srgb, var(--flag) 40%, transparent); background: color-mix(in srgb, var(--flag) 12%, transparent); }
+  .shadow_mute { color: var(--mute); border-color: color-mix(in srgb, var(--mute) 40%, transparent); background: color-mix(in srgb, var(--mute) 12%, transparent); }
+  .block { color: var(--block); border-color: color-mix(in srgb, var(--block) 40%, transparent); background: color-mix(in srgb, var(--block) 12%, transparent); }
+  .latency { color: var(--muted); font-size: 13px; font-family: ui-monospace, monospace; }
+  .reasons { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 16px; }
+  .reason { font-family: ui-monospace, monospace; font-size: 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 5px 0; font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; }
+  td.num { text-align: right; font-family: ui-monospace, monospace; width: 58px; }
+  .bar { height: 5px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin-top: 3px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  .bar > i.hot { background: var(--block); }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
+  .stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .stat .v { font-size: 20px; font-weight: 650; margin-top: 2px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Game chat moderation</h1>
+    <span class="model" id="model">loading…</span>
+  </header>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>Send a message</h2>
+      <label for="text">Message</label>
+      <textarea id="text" placeholder="type something…"></textarea>
+      <div class="samples" id="samples"></div>
+      <div class="row">
+        <div>
+          <label for="player">Player id</label>
+          <input id="player" value="player1">
+        </div>
+        <div>
+          <label for="target">Target id (optional)</label>
+          <input id="target" value="">
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="channel">Channel</label>
+          <input id="channel" value="global">
+        </div>
+        <div>
+          <label for="age">Account age (seconds, blank = known)</label>
+          <input id="age" value="86400">
+        </div>
+      </div>
+      <div id="keywrap" hidden>
+        <label for="apikey">API key (X-API-Key)</label>
+        <input id="apikey" type="password" placeholder="required by the service">
+      </div>
+      <div class="actions">
+        <button id="send">Send to moderation</button>
+        <button class="secondary" id="reset">Reset player</button>
+      </div>
+      <p class="hint" id="hint"></p>
+    </section>
+
+    <section class="panel">
+      <h2>Decision</h2>
+      <div id="result"><div class="empty">Send a message to see the decision, its reasons and the model scores.</div></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const SAMPLES = [
+  ["Clean", "gg, nice shot!"],
+  ["Toxic", "you are a disgusting idiot"],
+  ["Threat", "I will find you and break your legs"],
+  ["Link", "join my discord discord.gg/abcd1234"],
+  ["Caps flood", "GGGGGGGGGGGGGGGGGGGGGGGG"],
+  ["Emoji flood", "😀😀😀😀😀😀😀😀😀😀😀😀😀😀"],
+  ["Harassment", "are you there? why are you ignoring me?"],
+  ["Evasion", "n00b f@gg0t sk1ll"],
+];
+
+const $ = (id) => document.getElementById(id);
+let config = { model_id: "", labels: [] };
+
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function renderLabels() {
+  $("samples").innerHTML = SAMPLES.map(([name, text]) =>
+    `<button class="secondary" data-text="${esc(text)}">${esc(name)}</button>`).join("");
+  $("samples").querySelectorAll("button").forEach((button) => {
+    button.onclick = () => { $("text").value = button.dataset.text; send(); };
+  });
+}
+
+function scoreRows(scores) {
+  const entries = Object.entries(scores || {});
+  if (!entries.length) return '<tr><td colspan="3" class="empty">model skipped</td></tr>';
+  entries.sort((a, b) => b[1] - a[1]);
+  return entries.map(([label, value]) => {
+    const pct = Math.round(value * 100);
+    const hot = value >= 0.7 ? "hot" : "";
+    return `<tr><td>${esc(label)}</td>
+      <td><div class="bar"><i class="${hot}" style="width:${pct}%"></i></div></td>
+      <td class="num">${value.toFixed(3)}</td></tr>`;
+  }).join("");
+}
+
+function render(data) {
+  const action = data.action;
+  $("result").innerHTML = `
+    <div class="verdict">
+      <span class="badge ${esc(action)}">${esc(action.replace("_", " "))}</span>
+      <span class="latency">${data.latency_ms} ms</span>
+    </div>
+    <div class="reasons">${(data.reasons || []).map((r) => `<span class="reason">${esc(r)}</span>`).join("") || '<span class="reason">no signals</span>'}</div>
+    <table><thead><tr><th>Label</th><th></th><th class="num">Score</th></tr></thead>
+      <tbody>${scoreRows(data.scores)}</tbody></table>
+    <div class="stats">
+      <div class="stat"><div class="k">Player score</div><div class="v">${data.player_score}</div></div>
+      <div class="stat"><div class="k">Escalation</div><div class="v" style="font-size:15px">${esc(data.escalation)}</div></div>
+      <div class="stat"><div class="k">Target score</div><div class="v">${data.target_score ?? "—"}</div></div>
+    </div>`;
+}
+
+async function send() {
+  const text = $("text").value;
+  if (!text.trim()) { $("hint").textContent = "Type a message first."; return; }
+  $("hint").textContent = "";
+
+  const body = {
+    text,
+    player_id: $("player").value || "player1",
+    channel: $("channel").value || "global",
+  };
+  if ($("target").value) body.target_id = $("target").value;
+  const age = parseInt($("age").value, 10);
+  if (!Number.isNaN(age)) body.account_age_s = age;
+
+  const headers = { "Content-Type": "application/json" };
+  if ($("apikey").value) headers["X-API-Key"] = $("apikey").value;
+
+  try {
+    const response = await fetch("/moderate", { method: "POST", headers, body: JSON.stringify(body) });
+    const data = await response.json();
+    if (!response.ok) {
+      $("hint").textContent = `HTTP ${response.status}: ${data.detail || "error"}`;
+      return;
+    }
+    render(data);
+  } catch (error) {
+    $("hint").textContent = "Could not reach the API: " + error;
+  }
+}
+
+async function init() {
+  try {
+    config = await (await fetch("/demo/config")).json();
+    $("model").textContent = config.model_id || "unknown model";
+  } catch (error) {
+    $("model").textContent = "config unavailable";
+  }
+  $("keywrap").hidden = false;
+  renderLabels();
+  $("send").onclick = send;
+  $("reset").onclick = () => {
+    $("player").value = "player" + Math.floor(Math.random() * 9000 + 1000);
+    $("result").innerHTML = '<div class="empty">Send a message to see the decision, its reasons and the model scores.</div>';
+  };
+  $("text").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) send();
+  });
+}
+
+init();
+</script>
+</body>
+</html>

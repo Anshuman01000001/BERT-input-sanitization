@@ -1,0 +1,18 @@
+# Development / model-export dependencies. NOT installed into the runtime image.
+#
+# torch is installed from the CPU-only index to avoid pulling ~2.5GB of CUDA
+# wheels we never use:
+#   uv pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu
+-r requirements.txt
+
+torch==2.15.0
+transformers==5.23.0
+optimum[onnxruntime]==2.3.0
+onnx==1.23.2
+numpy>=2.0,<3
+
+pytest==9.2.0
+pytest-asyncio==1.5.0
+httpx==0.28.1
+fakeredis==2.40.0
+ruff==0.17.5

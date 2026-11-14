@@ -1,0 +1,22 @@
+# Keep the build context small: only the runtime needs to be in the image.
+.venv/
+.venv-export/
+build/
+tests/
+demo/
+tools/
+.git/
+.github/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env
+*.md
+
+# Only the three runtime model artifacts are needed.
+models/*
+!models/model_int8.onnx
+!models/tokenizer.json
+!models/model_meta.json
