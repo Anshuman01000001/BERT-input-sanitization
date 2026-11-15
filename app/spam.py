@@ -7,11 +7,13 @@ stopped without spending a single CPU cycle on the model.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.config import Settings
 from app.normalize import NormalizedMessage, similarity
@@ -41,6 +43,8 @@ _EXTERNAL_INVITE_RE = re.compile(
 # Signals that send the message to human review rather than muting it.
 _REVIEW_ONLY_REASONS = frozenset({"link", "discord_invite", "external_invite"})
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class SpamVerdict:
@@ -54,6 +58,11 @@ class SpamVerdict:
     action: str = "allow"
     reasons: tuple[str, ...] = ()
     detail: dict[str, float] = field(default_factory=dict)
+    # False when the stateful checks (rate limiting and duplicates) could
+    # not run. The stateless ones - caps floods, character floods, links and
+    # invites - always run: they need no Redis, and losing them because
+    # Redis is down would be a needless blind spot.
+    state_available: bool = True
 
     @property
     def is_spam(self) -> bool:
@@ -117,36 +126,55 @@ class SpamChecker:
         message: NormalizedMessage,
         account_age_s: int | None = None,
     ) -> SpamVerdict:
-        """Run every spam check and return the combined verdict."""
-        reasons: list[str] = []
-        detail: dict[str, float] = {}
-        action = "allow"
+        """Run every spam check and return the combined verdict.
 
-        rate_count = await self._rate_limit_count(player_id, account_age_s)
-        if rate_count is not None:
-            reasons.append("rate_limit")
-            detail["rate_limit_count"] = float(rate_count)
-            action = "shadow_mute"
-
-        duplicate, near_duplicate = await self._duplicate_signals(player_id, message)
-        if duplicate is not None:
-            reasons.append("duplicate")
-            detail["duplicate_count"] = float(duplicate)
-            action = "shadow_mute"
-        elif near_duplicate is not None:
-            reasons.append("near_duplicate")
-            detail["near_duplicate_similarity"] = near_duplicate
-            action = "shadow_mute"
-
+        The stateless checks run first and always; the stateful ones degrade
+        to "not available" if Redis is unreachable rather than taking the
+        whole verdict down with them.
+        """
         pattern_reasons, pattern_detail = self._pattern_signals(message)
-        reasons.extend(pattern_reasons)
-        detail.update(pattern_detail)
-        if _REVIEW_ONLY_REASONS.intersection(pattern_reasons) and action == "allow":
+        reasons: list[str] = list(pattern_reasons)
+        detail: dict[str, float] = dict(pattern_detail)
+        action = "allow"
+        if _REVIEW_ONLY_REASONS.intersection(pattern_reasons):
             # A single link or invite is worth reviewing, not worth
             # shadow-muting on its own.
             action = "flag"
+        elif pattern_reasons:
+            action = "shadow_mute"
 
-        return SpamVerdict(action=action, reasons=tuple(reasons), detail=detail)
+        state_available = True
+        try:
+            rate_count = await self._rate_limit_count(player_id, account_age_s)
+            if rate_count is not None:
+                reasons.append("rate_limit")
+                detail["rate_limit_count"] = float(rate_count)
+                action = "shadow_mute"
+
+            duplicate, near_duplicate = await self._duplicate_signals(
+                player_id, message
+            )
+            if duplicate is not None:
+                reasons.append("duplicate")
+                detail["duplicate_count"] = float(duplicate)
+                action = "shadow_mute"
+            elif near_duplicate is not None:
+                reasons.append("near_duplicate")
+                detail["near_duplicate_similarity"] = near_duplicate
+                action = "shadow_mute"
+        except RedisError:
+            logger.warning(
+                "redis unavailable; the stateful spam checks are disabled",
+                exc_info=True,
+            )
+            state_available = False
+
+        return SpamVerdict(
+            action=action,
+            reasons=tuple(reasons),
+            detail=detail,
+            state_available=state_available,
+        )
 
     async def _rate_limit_count(
         self, player_id: str, account_age_s: int | None

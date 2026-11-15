@@ -95,7 +95,7 @@ class ModerationService:
             else _no_spam(),
             SpamVerdict(),
         )
-        state_available = state_available and ok
+        state_available = state_available and ok and spam_verdict.state_available
         if spam_verdict.reasons:
             reasons.extend(spam_verdict.reasons)
             action = worst(action, spam_verdict.action)

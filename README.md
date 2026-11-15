@@ -351,6 +351,108 @@ VPS, and the handoff's 10-30 ms estimate was explicitly unbenchmarked. Run
 
 ---
 
+## Testing it
+
+Four levels, from fastest to most complete.
+
+### 1. The test suite
+
+```bash
+.venv/bin/python -m pytest tests/ -q       # 125 tests, ~7 s
+.venv/bin/ruff check .
+```
+
+Runs entirely in-process against `fakeredis`, and loads the real quantized
+model, so it covers the export as well as the service.
+
+### 2. The scripted demo — no server, no Redis
+
+```bash
+.venv/bin/python demo/demo_chat.py
+```
+
+Prints seven scenarios end to end: clean chat, a toxic message, a threat, a
+spam burst, a harassment sequence, an evasion attempt and a player report,
+each with the action, the reasons and the classifier scores. This is the
+quickest way to show the pipeline doing its thing — it needs nothing but the
+model file.
+
+### 3. The live service and the demo page
+
+```bash
+# Redis is needed for spam, harassment and the behaviour score.
+docker compose up --build
+
+# Or, without Docker, run Redis yourself and:
+MOD_API_KEY=some-long-dev-key \
+MOD_REDIS_URL=redis://localhost:6379/0 \
+  .venv/bin/uvicorn app.main:app --port 8000
+```
+
+Then open <http://localhost:8000/demo>. The page has one-click samples
+(clean, toxic, threat, link, caps flood, emoji flood, harassment, evasion)
+and shows the decision, the reasons, the per-label scores and the latency.
+
+Two things to know:
+
+* The service **refuses to start** on the well-known development key. Set
+  `MOD_API_KEY` to at least 16 characters, or
+  `MOD_ALLOW_INSECURE_DEFAULT_KEY=true` for local work.
+* Without Redis it still runs and still classifies, but the spam burst,
+  harassment and behaviour score do not fire, and the response says
+  `state_unavailable`. The stateless checks — caps floods, links, Discord
+  invites — keep working either way.
+
+### 4. A deployed instance
+
+```bash
+.venv/bin/python tools/smoke_test.py --url http://localhost:8000 \
+    --api-key "$MOD_API_KEY"
+```
+
+Ten checks against a running service over HTTP: health, authentication, the
+main decisions, that a threat carrying a link is still blocked, that the
+behaviour score grows, that a report about a stranger moves nothing, and
+that an oversized body is refused. Exits non-zero on failure, so it works as
+a deployment gate. Checks that need Redis are *skipped*, not failed, when
+Redis is unreachable.
+
+### 5. Latency
+
+```bash
+.venv/bin/python tools/benchmark.py --messages 1000
+.venv/bin/python tools/benchmark.py --url http://localhost:8000 --messages 500
+```
+
+### Suggested 15-minute run-of-show
+
+1. `pytest -q` — "the whole thing is tested; here's the count."
+2. `demo/demo_chat.py` — walk through the scenarios; point at the `reasons`
+   line to show the decision is explainable, not a black box.
+3. Open `/demo` — click the **Threat** and **Spam burst** samples; show the
+   score bars and the latency.
+4. `tools/smoke_test.py` — "this is what we run against the box before
+   pointing the game server at it."
+5. Open `app/service.py` — the pipeline is one readable function.
+
+### Prerequisites
+
+The model file is not committed (105 MB). If `models/model_int8.onnx` is
+missing, regenerate it:
+
+```bash
+uv venv --python 3.12 .venv-export
+uv pip install --python .venv-export/bin/python torch==2.15.0 \
+    --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python .venv-export/bin/python -r requirements-export.txt
+.venv-export/bin/python tools/export_model.py
+```
+
+The export verifies itself and refuses to publish an artifact that changes a
+decision.
+
+---
+
 ## Tests
 
 ```bash
