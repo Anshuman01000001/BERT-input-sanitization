@@ -16,6 +16,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.config import Settings
+from app.logging_config import RECURRING_ERRORS
 from app.normalize import NormalizedMessage, similarity
 from app.redis_client import (
     duplicate_key,
@@ -163,10 +164,11 @@ class SpamChecker:
                 detail["near_duplicate_similarity"] = near_duplicate
                 action = "shadow_mute"
         except RedisError:
-            logger.warning(
-                "redis unavailable; the stateful spam checks are disabled",
-                exc_info=True,
-            )
+            if RECURRING_ERRORS.should_report("spam"):
+                logger.warning(
+                    "redis unavailable; the stateful spam checks are disabled",
+                    exc_info=True,
+                )
             state_available = False
 
         return SpamVerdict(

@@ -87,7 +87,9 @@ def build_scorer(path: Path, settings: Settings) -> ToxicityModel:
     """
     scorer = ToxicityModel(
         model_dir=settings.model_dir,
-        onnx_file=str(path),
+        # Absolute: ``load`` prepends the model directory to a relative file
+        # name, and the graph being benchmarked is not always inside it.
+        onnx_file=str(path.resolve()),
         tokenizer_file=settings.tokenizer_file,
         labels_file=settings.labels_file,
         threads=settings.onnx_threads,

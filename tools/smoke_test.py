@@ -85,7 +85,8 @@ async def run_checks(client, url: str, api_key: str) -> list[tuple[str, str, str
     cases = [
         ("clean chat is allowed", "gg, nice shot!", "allow"),
         ("a threat is blocked", "I will find you and break your legs", "block"),
-        ("an insult is flagged", "you are a disgusting idiot", "flag"),
+        ("an insult is blocked", "you are a disgusting idiot", "block"),
+        ("a mild trait is held back", "go away nobody likes you", "shadow_mute"),
         ("a discord invite is flagged", "join my discord discord.gg/abcd1234", "flag"),
     ]
     for index, (name, text, expected) in enumerate(cases):

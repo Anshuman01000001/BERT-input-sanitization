@@ -59,6 +59,16 @@ class ModerateResponse(BaseModel):
     """The moderation decision plus the evidence behind it."""
 
     action: Action = Field(..., description="What the game server should do.")
+    review: bool = Field(
+        False,
+        description=(
+            "True when a human should look at this message. It is separate "
+            "from the action on purpose: the escalation ladder can raise a "
+            "player to 'flag for review' while the message itself is held "
+            "back from other players, and that combination still has to "
+            "reach a moderator."
+        ),
+    )
     reasons: list[str] = Field(
         ..., description="Machine-readable evidence, e.g. 'threat:0.97'."
     )
@@ -84,3 +94,77 @@ class HealthResponse(BaseModel):
     model_id: str | None = None
     redis_ok: bool
     version: str
+
+
+class CompressRequest(BaseModel):
+    """A payload to compress.
+
+    ``content_type`` forces a compressor instead of auto-detecting one.
+    ``query`` biases query-aware compressors toward the parts of the payload
+    that matter to the question being asked.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(
+        ...,
+        max_length=262_144,
+        description="The payload to compress.",
+    )
+    content_type: str | None = Field(
+        None,
+        max_length=64,
+        description="Force a compressor (json, log, tabular, config, ...) "
+        "instead of auto-detecting one.",
+    )
+    query: str = Field(
+        "",
+        max_length=1024,
+        description="Bias what survives toward this query.",
+    )
+    mode: Literal["compress", "record"] = Field(
+        "compress",
+        description="'record' never transforms; it only reports the token counts.",
+    )
+
+
+class CompressResponse(BaseModel):
+    """The compressed payload and the accounting behind it.
+
+    Every token figure is a local estimate, not provider usage. ``basis``
+    says which, and it is always ``inferred`` — the engine never claims a
+    measured number it did not measure.
+    """
+
+    output: str = Field(..., description="The compressed payload.")
+    content_type: str = Field(..., description="The detected or forced content type.")
+    tokens_before: int = Field(..., description="Estimated tokens in the input.")
+    tokens_after: int = Field(..., description="Estimated tokens in the output.")
+    tokens_saved: int = Field(..., description="Estimated tokens removed.")
+    token_count_basis: str = Field(..., description="Which estimator produced the counts.")
+    ratio: float = Field(..., description="Fraction of tokens removed, 0..1.")
+    basis: str = Field(..., description="Always 'inferred' for the token figures.")
+    recovery_handle: str | None = Field(
+        None,
+        description="Handle for byte-exact recovery of the original. "
+        "Present only when the payload was actually transformed.",
+    )
+    method: str | None = Field(
+        None, description="Which compressor ran. Absent on pass-through."
+    )
+    lossless_to_model: bool | None = Field(
+        None,
+        description="Whether the output kept the full value without data dropped.",
+    )
+    passed_through: bool = Field(
+        ...,
+        description="True when the input was returned unchanged and nothing was claimed.",
+    )
+
+
+class RecoverResponse(BaseModel):
+    """The exact original bytes for a recovery handle."""
+
+    handle: str
+    content: str = Field(..., description="The original payload, byte-for-byte.")
+    content_type: str = Field(..., description="The content type it was stored under.")

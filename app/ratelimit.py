@@ -20,6 +20,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.config import Settings
+from app.logging_config import RECURRING_ERRORS
 from app.redis_client import api_limit_key
 
 logger = logging.getLogger(__name__)
@@ -83,9 +84,10 @@ class ApiRateLimiter:
                 pipe.incr(global_key)
                 results = await pipe.execute()
         except RedisError:
-            logger.warning(
-                "redis unavailable; rate limiting locally instead", exc_info=True
-            )
+            if RECURRING_ERRORS.should_report("ratelimit"):
+                logger.warning(
+                    "redis unavailable; rate limiting locally instead", exc_info=True
+                )
             if not self._local.allow(
                 client_key, settings.api_rate_limit_count, window
             ):

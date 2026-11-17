@@ -15,12 +15,15 @@ runnable against fakeredis).
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 import uuid
 
 from redis.asyncio import Redis
 
 from app.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 def rate_key(player_id: str) -> str:
@@ -105,7 +108,27 @@ def unique_member(timestamp: float) -> str:
 
 
 def create_client(settings: Settings) -> Redis:
-    """Build an async Redis client from settings."""
+    """Build an async Redis client from settings.
+
+    ``MOD_REDIS_URL=fakeredis://`` runs the stateful checks against an
+    in-process fake Redis. It is a development convenience for machines with
+    no Redis server: the state does not survive the process and is not shared
+    between workers, so it is not a substitute for the real thing.
+    """
+    if settings.redis_url.startswith("fakeredis://"):
+        try:
+            import fakeredis.aioredis as fakeredis
+        except ImportError as exc:
+            raise RuntimeError(
+                "MOD_REDIS_URL points at fakeredis, but fakeredis is not "
+                "installed. Install the development dependencies: "
+                "uv pip install -r requirements-dev.txt"
+            ) from exc
+        logger.info(
+            "using an in-process fake redis; the state is not shared or persisted"
+        )
+        return fakeredis.FakeRedis(decode_responses=True)
+
     return Redis.from_url(
         settings.redis_url,
         decode_responses=True,

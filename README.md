@@ -30,7 +30,7 @@ skipped entirely (`MOD_SKIP_MODEL_ON_SPAM=true`).
 | 2. Spam | `app/spam.py` | Sliding-window rate limit, exact and near-duplicate detection, caps/character/symbol/length floods, link and invite detection. |
 | 3. Harassment | `app/harassment.py` | Unanswered targeting, rising toxicity within a pair, pile-on detection, weighted player reports. |
 | 4. BERT | `app/model.py` | ONNX Runtime int8 scoring, padded into fixed buckets, with an LRU cache. |
-| 5. Decision | `app/service.py`, `app/scoring.py` | Per-category thresholds, behaviour score with time decay, escalation ladder. |
+| 5. Decision | `app/service.py`, `app/traits.py`, `app/scoring.py` | Trait severity bands, behaviour score with time decay, escalation ladder. |
 
 ---
 
@@ -42,7 +42,7 @@ skipped entirely (`MOD_SKIP_MODEL_ON_SPAM=true`).
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements-dev.txt
 
-.venv/bin/python -m pytest tests/ -q        # 96 tests
+.venv/bin/python -m pytest tests/ -q        # 150 tests
 .venv/bin/python demo/demo_chat.py           # scripted demonstration
 ```
 
@@ -109,10 +109,11 @@ Requires the `X-API-Key` header.
 
 ```json
 {
-  "action": "flag",
+  "action": "block",
+  "review": false,
   "reasons": ["toxic:0.99", "insult:0.97"],
   "scores": {"toxic": 0.9903, "insult": 0.966, "threat": 0.0017},
-  "player_score": 2,
+  "player_score": 5,
   "target_score": null,
   "escalation": "none",
   "muted_for_s": null,
@@ -127,11 +128,45 @@ Requires the `X-API-Key` header.
 | `block` | Reject it and tell the sender why. |
 | `shadow_mute` | Deliver it to the sender only; nobody else sees it. |
 
+`review` is a separate boolean, and it is the signal to queue something for a
+moderator. It is separate from the action because the two can disagree: the
+escalation ladder raises a *player* to "flag for review" while the message
+itself is held back from other players, and that message still has to reach
+a human. Queue on `review`, not on `action == "flag"`.
+
 `reasons` is the evidence, machine-readable: `rate_limit`, `duplicate`,
 `near_duplicate`, `link`, `discord_invite`, `external_invite`, `caps_flood`,
 `char_flood`, `symbol_flood`, `length_flood`, `unanswered_targeting`,
 `escalating_toxicity`, `pile_on`, `report`, `confirmed_report`, plus one
-entry per classifier label that crossed a threshold (`threat:0.82`).
+entry per classifier trait that reached the review threshold
+(`threat:0.82`, `toxic:0.99`).
+
+### How the decision is made
+
+The classifier scores six traits independently — `toxic`, `severe_toxic`,
+`obscene`, `threat`, `insult`, `identity_hate`. The **severity** of a message
+is the strongest of them, and every trait counts equally. Two bands turn that
+number into an action:
+
+| Severity | Action | What happens |
+|---|---|---|
+| `>= 0.70` (`MOD_BLOCK_THRESHOLD`) | `block` | Rejected; the sender is told why. |
+| `>= 0.50` (`MOD_REVIEW_THRESHOLD`) | `shadow_mute` | The sender sees their own message; nobody else does. |
+| below that | `allow` | Delivered unchanged. |
+
+So a message the model reads as 53% toxic is no longer silently allowed —
+it is held back from other players — and one it reads as 99% toxic is
+rejected rather than delivered with a "please review" note attached.
+
+This replaced an earlier scheme with a hard/soft split, where the soft
+categories (`toxic`, `insult`, `obscene`) could only ever *flag*, and a flag
+is delivered. That scheme had two holes: a trait between 0.01 and 0.90
+produced no action at all, and the strongest insults the model detects were
+delivered to other players no matter how certain the model was.
+
+A report is never classified. Its text describes the behaviour being
+reported, so classifying it would block the reporter and charge them for
+filing the report.
 
 ### `GET /health`
 
@@ -160,8 +195,8 @@ stops counting.
 |---|---|
 | Rate limit hit | +1 |
 | Duplicate / spam | +2 |
-| Toxic flag (soft category) | +2 |
-| Toxic block (hard category) | +5 |
+| Toxic message held back (review band) | +2 |
+| Toxic message rejected (block) | +5 |
 | Harassment pattern | +10 |
 | Confirmed report | +10 |
 | Unconfirmed report | +0 |
@@ -183,7 +218,7 @@ corroborates it:
 * there must be a real exchange between the two players — a report cannot be
   aimed at a stranger;
 * the **target's own** messages in that exchange must have been scored as
-  toxic (`MOD_FLAG_THRESHOLD`);
+  toxic (`MOD_REPORT_CORROBORATION_THRESHOLD`);
 * the reporter's own history scales the weight, so a serial false-reporter
   loses influence;
 * one reporter may contribute at most `MOD_REPORT_POINTS_CAP` points to one
@@ -207,8 +242,9 @@ Everything is an environment variable with the `MOD_` prefix; see
 | `MOD_REQUIRE_API_KEY` | `true` | |
 | `MOD_REDIS_URL` | `redis://localhost:6379/0` | |
 | `MOD_ONNX_THREADS` | `2` | Keep `workers * threads` under the core count. |
-| `MOD_BLOCK_THRESHOLD` | `0.70` | Hard categories: `threat`, `identity_hate`, `severe_toxic`. |
-| `MOD_FLAG_THRESHOLD` | `0.90` | Soft categories: `toxic`, `insult`, `obscene`. |
+| `MOD_BLOCK_THRESHOLD` | `0.70` | Severity at or above this rejects the message. |
+| `MOD_REVIEW_THRESHOLD` | `0.50` | Severity at or above this holds the message back from other players. |
+| `MOD_REPORT_CORROBORATION_THRESHOLD` | `0.90` | How toxic the target's own messages must have been for a report about them to count. |
 | `MOD_RATE_LIMIT_COUNT` / `_WINDOW_S` | `5` / `10` | 5 messages per 10 seconds. |
 | `MOD_NEW_ACCOUNT_RATE_LIMIT` | `3` | For accounts under `MOD_NEW_ACCOUNT_AGE_S` (1 hour). |
 | `MOD_SKIP_MODEL_ON_SPAM` | `true` | Skip the classifier when a cheap check already decided. |
@@ -358,7 +394,7 @@ Four levels, from fastest to most complete.
 ### 1. The test suite
 
 ```bash
-.venv/bin/python -m pytest tests/ -q       # 125 tests, ~7 s
+.venv/bin/python -m pytest tests/ -q       # 150 tests, ~7 s
 .venv/bin/ruff check .
 ```
 
@@ -383,25 +419,55 @@ model file.
 # Redis is needed for spam, harassment and the behaviour score.
 docker compose up --build
 
-# Or, without Docker, run Redis yourself and:
+# Or, on a machine with no Redis server, run the state in-process:
 MOD_API_KEY=some-long-dev-key \
-MOD_REDIS_URL=redis://localhost:6379/0 \
+MOD_REDIS_URL=fakeredis:// \
   .venv/bin/uvicorn app.main:app --port 8000
 ```
+
+`fakeredis://` is a development convenience: the state is not shared or
+persisted, so it is not a substitute for the real Redis. It exists so that a
+laptop without Redis can still exercise spam, harassment and the behaviour
+score.
 
 Then open <http://localhost:8000/demo>. The page has one-click samples
 (clean, toxic, threat, link, caps flood, emoji flood, harassment, evasion)
 and shows the decision, the reasons, the per-label scores and the latency.
 
-Two things to know:
+Or skip the page and send inputs from the terminal:
+
+```bash
+.venv/bin/python tools/send.py "I will find you and break your legs"
+.venv/bin/python tools/send.py --target victim --player mallory "why are you ignoring me"
+.venv/bin/python tools/send.py --report --target mallory "reporting this"
+```
+
+```
+  'I will find you and break your legs'
+  BLOCK  (4.82 ms)
+  reasons    threat:0.82
+  scores     toxic=0.85  threat=0.82  severe_toxic=0.09
+  player     score 5   escalation warn
+```
+
+The key comes from `$MOD_API_KEY` unless `--api-key` says otherwise.
+
+Three things to know:
 
 * The service **refuses to start** on the well-known development key. Set
   `MOD_API_KEY` to at least 16 characters, or
   `MOD_ALLOW_INSECURE_DEFAULT_KEY=true` for local work.
+* Every request needs the `X-API-Key` header, and a missing one is a `401`.
+  For local work with no key at all, start the service with
+  `MOD_REQUIRE_API_KEY=false` — it is refused in every other mode. If the
+  key is rejected, compare the fingerprint the server logs at startup with
+  `.venv/bin/python tools/send.py --fingerprint x`.
 * Without Redis it still runs and still classifies, but the spam burst,
   harassment and behaviour score do not fire, and the response says
   `state_unavailable`. The stateless checks — caps floods, links, Discord
-  invites — keep working either way.
+  invites — keep working either way. A Redis outage is logged once per
+  condition per minute, not once per request, so the audit trail stays
+  readable.
 
 ### 4. A deployed instance
 
@@ -456,7 +522,7 @@ decision.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q     # 96 tests
+.venv/bin/python -m pytest tests/ -q     # 150 tests
 .venv/bin/ruff check .
 ```
 
@@ -496,9 +562,10 @@ Everything the handoff left uncertain, and everything that changed.
 6. **Player IDs are restricted to `[A-Za-z0-9_-]{1,64}`.** They are
    interpolated into Redis keys, so an unrestricted ID could escape the key
    namespace. This is an input-validation rule, not a stack change.
-7. **A toxic *flag* adds +2 points.** The handoff's table lists "Toxic block
-   +5"; §4.4 also says classifier scores feed the player's record. Flagging
-   with no consequence at all would make the flag threshold inert.
+7. **A toxic message that is acted on adds points.** The handoff's table
+   lists "Toxic block +5"; §4.4 also says classifier scores feed the player's
+   record. Acting on a message with no consequence at all would make the
+   threshold inert.
 8. **An unconfirmed report counts for +5, a confirmed one for +10.** The
    table lists "Confirmed report +10"; an unconfirmed report still contributes
    but should not carry the full weight.
@@ -508,10 +575,11 @@ Everything the handoff left uncertain, and everything that changed.
 10. **Links and invites are flagged; floods and duplicates are shadow-muted.**
     A single link is worth review, not a mute. Spam bursts get the shadow mute
     the handoff specifies.
-11. **Soft and hard categories.** The handoff's examples imply one threshold
-    per category ("block threat at 0.7, flag insult at 0.9"). Implemented as
-    two groups: hard categories block at 0.70, soft categories only flag at
-    0.90.
+11. **One threshold per category, then one severity.** The handoff's examples
+    imply one threshold per category ("block threat at 0.7, flag insult at
+    0.9"). That was first implemented as two groups — hard categories block
+    at 0.70, soft categories only flag at 0.90 — and later replaced by a
+    single trait severity; see 19.
 12. **A report only counts when corroborated.** The handoff asked for reports
     "weighted by the reporter's history (anti-false-report)". Taken alone that
     is not enough: without corroboration a player can report a stranger and
@@ -539,6 +607,40 @@ Everything the handoff left uncertain, and everything that changed.
     keyed by the API key let one caller spend everyone's budget, and it had
     no client dimension to stop a rotating `player_id` bypassing the
     per-player limit.
+19. **The decision follows one trait severity, not two label thresholds.**
+    The hard/soft split is gone: the severity is the strongest trait the
+    classifier found, every trait counts equally, and two bands decide the
+    action — `>= 0.70` rejects, `>= 0.50` holds the message back from other
+    players. This closes a dead zone (a trait at 0.60 used to produce no
+    action and no reason, so the message was delivered and never reached a
+    human) and it lets the strongest insults the model detects be rejected
+    rather than delivered with a "please review" note attached.
+    `MOD_FLAG_THRESHOLD`, `MOD_HARD_LABELS` and `MOD_SOFT_LABELS` are
+    retired; they are still accepted, and startup warns when one is set, so
+    a knob that stopped doing anything cannot mislead an operator.
+20. **Report corroboration has its own threshold.** The target's own messages
+    must have reached `MOD_REPORT_CORROBORATION_THRESHOLD` (0.90) — the
+    pre-existing bar, under its own name. Reusing the action band for it
+    would have made a report worth ten points for any mildly rude message,
+    which is exactly how a report becomes a weapon: one reporter can put ten
+    points on a target per hour, so a corroboration bar that ordinary chat
+    clears is a mute in three hours.
+21. **A report is not classified.** The classifier runs on chat, and a
+    report's text necessarily describes the behaviour being reported —
+    "this player is toxic and harassing me" is itself toxic text. Classifying
+    it would block the reporter and charge them five points for filing the
+    report. The spam and harassment checks were already exempt for this
+    reason; the classifier now is too.
+22. **Review is reported separately from the action.** `ModerateResponse`
+    carries a `review` boolean. The escalation ladder raises a *player* to
+    "flag for review", and merging that into the single action ordering
+    would swallow it whenever the message itself was held back — a player
+    under review whose abusive message is shadow-muted would have had only
+    their least offensive messages queued.
+23. **The compression engine no longer gates the service.** `/compress` is
+    an auxiliary capability, so its import is deferred and a missing engine
+    disables those endpoints instead of stopping the moderation service from
+    starting.
 
 ### Not verified here
 
@@ -555,11 +657,27 @@ Everything the handoff left uncertain, and everything that changed.
   The service loads exactly one model. Adding a second would mean a second
   ONNX session and a second warm-up, and the licence is unclear.
 - **`pip-audit` was not run.** No network access to the advisory database.
+- **The compression engine (`caveman/`) is a partial port.** Five of its
+  compressors (`html`, `json`, `log`, `terminal`, `testreport`) were never
+  written, so the package does not import and its test modules are skipped.
+  The moderation service does not depend on it: `/compress` answers 503
+  while the engine is unavailable.
 
 ### Known limitations of the approach
 
 - toxic-bert was trained on Jigsaw (online comments). It misjudges gaming
   slang and trash talk, and has known bias around identity terms.
+- **The block threshold is strict for game chat.** The model reads ordinary
+  trash talk as toxic — "this game is trash" scores 0.86, "wtf are you
+  doing" 0.90 — so a block at 0.70 rejects a fair amount of banter along
+  with the abuse. Measured over 25 ordinary game-chat messages, 12 were
+  blocked. It compounds: a block costs 5 points and the mute tier is 30,
+  so **six** false blocks mute a legitimate player, and because a blocked
+  message is never delivered, the benign context never reaches another
+  player and nobody disputes it. `MOD_BLOCK_THRESHOLD`,
+  `MOD_REVIEW_THRESHOLD`, `points_toxic_block` and `score_mute_at` are the
+  knobs, and none of them has been tuned against a corpus of real game
+  messages.
 - English-focused.
 - It sees one message at a time, with no conversation context — which is why
   the Redis layer exists.

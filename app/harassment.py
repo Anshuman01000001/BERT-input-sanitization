@@ -266,7 +266,7 @@ class HarassmentTracker:
             ),
             default=0.0,
         )
-        corroborated = target_toxicity >= settings.flag_threshold
+        corroborated = target_toxicity >= settings.report_corroboration_threshold
 
         made = await self._increment(reports_made_key(reporter_id), settings.score_ttl_s)
         against = await self._increment(

@@ -131,6 +131,19 @@ class TestReports:
         assert report.points == 0
         assert report.reason == "report"
 
+    async def test_a_mild_message_does_not_corroborate_a_report(self, tracker):
+        """The evidence bar is separate from the action band.
+
+        A message that is merely held back from other players is not strong
+        evidence that a target abused someone, and a report carries ten
+        points - so corroboration has its own threshold rather than reusing
+        the one at which the service starts hiding messages.
+        """
+        await self.make_exchange(tracker, 0.67)
+        report = await tracker.register_report("reporter", "target", 0)
+        assert report.points == 0
+        assert report.reason == "report"
+
     async def test_a_report_is_confirmed_by_the_targets_own_toxicity(self, tracker):
         await self.make_exchange(tracker, 0.95)
         report = await tracker.register_report("reporter", "target", 0)

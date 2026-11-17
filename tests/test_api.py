@@ -89,6 +89,39 @@ class TestModeration:
         assert body["scores"]["toxic"] < 0.5
         assert body["player_score"] == 0
 
+    async def test_a_strong_trait_is_blocked(self, client):
+        """A trait in the 0.9 range is not "a flag for review": it is a block."""
+        body = await post(
+            client, text="you are a disgusting idiot", player_id="insult"
+        )
+        assert body["action"] == "block"
+        assert any(reason.startswith("toxic:") for reason in body["reasons"])
+
+    async def test_a_moderate_trait_is_held_back_from_other_players(self, client):
+        """The dead zone this closed: 0.67 was allowed with no reason at all."""
+        body = await post(
+            client, text="go away nobody likes you", player_id="mild"
+        )
+        assert body["action"] == "shadow_mute"
+        assert any(reason.startswith("toxic:") for reason in body["reasons"])
+
+    async def test_a_report_is_not_classified(self, client):
+        """A report's text describes the abuse, so it must not be judged as chat.
+
+        "this player is toxic and harassing me" is itself toxic text; a
+        reporter who wrote that must not be blocked, or charged for it.
+        """
+        body = await post(
+            client,
+            text="you are all disgusting idiots",
+            player_id="angry_reporter",
+            target_id="culprit",
+            is_report=True,
+        )
+        assert body["action"] == "allow"
+        assert body["player_score"] == 0
+        assert body["scores"] == {}
+
     async def test_a_threat_is_blocked(self, client):
         body = await post(
             client, text="I will find you and break your legs", player_id="threat"
@@ -96,6 +129,31 @@ class TestModeration:
         assert body["action"] == "block"
         assert any(reason.startswith("threat:") for reason in body["reasons"])
         assert body["player_score"] > 0
+
+    async def test_a_held_back_message_still_reaches_a_human(self, client):
+        """A shadow-muted message must not swallow the review signal.
+
+        The escalation ladder raises the *player* to 'flag for review' while
+        the message itself stays held back from other players. Both facts
+        have to reach the game server, so the review is reported separately
+        from the action.
+        """
+        for text in (
+            "you are a disgusting idiot",
+            "your mom is a whore",
+            "shut up you moron",
+        ):
+            await post(client, text=text, player_id="loud")
+        body = await post(
+            client, text="go away nobody likes you", player_id="loud"
+        )
+        assert body["action"] == "shadow_mute"
+        assert body["escalation"] == "flag"
+        assert body["review"] is True
+
+    async def test_an_ordinary_message_is_not_queued_for_review(self, client):
+        body = await post(client, text="gg, nice shot!", player_id="quiet2")
+        assert body["review"] is False
 
     async def test_a_spam_burst_is_shadow_muted(self, client):
         for text in BURST:
@@ -160,11 +218,14 @@ class TestModeration:
             target_id="culprit",
             is_report=True,
         )
-        assert body["target_score"] == 12
+        assert body["target_score"] == 15
         assert "confirmed_report" in body["reasons"]
 
     async def test_a_report_about_a_stranger_counts_for_nothing(self, client):
-        await post(client, text="you are a disgusting idiot", player_id="quiet")
+        first = await post(
+            client, text="you are a disgusting idiot", player_id="quiet"
+        )
+        target_before = first["player_score"]
         body = await post(
             client,
             text="reporting this behaviour",
@@ -172,7 +233,9 @@ class TestModeration:
             target_id="quiet",
             is_report=True,
         )
-        assert body["target_score"] == 2
+        # The report contributes nothing: the target's score is exactly what
+        # it was before the report arrived.
+        assert body["target_score"] == target_before
         assert "report_no_history" in body["reasons"]
 
     async def test_a_report_without_corroboration_moves_nothing(self, client):

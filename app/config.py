@@ -6,15 +6,28 @@ e.g. ``MOD_BLOCK_THRESHOLD=0.65``. See ``.env.example`` for the full list.
 
 from __future__ import annotations
 
+import hashlib
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Placeholder used only when the operator has not set MOD_API_KEY. Startup logs
 # a warning when this value is still in use.
 DEFAULT_API_KEY = "dev-insecure-key-change-me"
+
+
+def api_key_fingerprint(api_key: str) -> str:
+    """A short, non-reversible identifier for an API key.
+
+    The service logs this at startup and the client can print the same
+    value, so an operator can confirm that both ends hold the same key
+    without the key itself appearing anywhere.
+    """
+    if not api_key:
+        return "none"
+    return "sha256:" + hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
 
 class Settings(BaseSettings):
@@ -55,14 +68,28 @@ class Settings(BaseSettings):
     # --- request limits ----------------------------------------------------
     max_message_chars: int = 256
     max_body_bytes: int = 4096
+    # The compression endpoint takes whole files, not chat messages, so it gets
+    # its own body limit. It is still authenticated and rate-limited; only the
+    # size cap differs.
+    compress_max_body_bytes: int = 262_144
 
     # --- toxicity thresholds ----------------------------------------------
-    # Hard categories block at a low threshold (a credible threat is a threat);
-    # soft categories only flag at a high threshold (gaming banter is common).
+    # Severity is the strongest trait the classifier found, and every trait
+    # counts - there is no hard/soft split and no dead zone. Two bands:
+    #
+    #   severity >= block_threshold  -> the message is rejected outright
+    #   severity >= review_threshold -> it is held back from other players
+    #
+    # Below the review threshold the message is delivered unchanged.
     block_threshold: float = 0.70
-    flag_threshold: float = 0.90
-    hard_labels: tuple[str, ...] = ("threat", "identity_hate", "severe_toxic")
-    soft_labels: tuple[str, ...] = ("toxic", "insult", "obscene")
+    review_threshold: float = 0.50
+    # A player report is a claim, not evidence, and it carries ten points, so
+    # it needs strong evidence: the target's own messages in the exchange
+    # must have been at least this toxic. This is deliberately separate from
+    # the review threshold - reusing the action band here made a report
+    # worth 10 points for any mildly rude message, which is how a report
+    # becomes a weapon.
+    report_corroboration_threshold: float = 0.90
 
     # --- spam --------------------------------------------------------------
     rate_limit_count: int = 5
@@ -101,7 +128,7 @@ class Settings(BaseSettings):
     points_rate_limit: int = 1
     points_spam: int = 2
     points_toxic_block: int = 5
-    points_toxic_flag: int = 2
+    points_toxic_review: int = 2
     points_harassment: int = 10
     points_report: int = 10
 
@@ -130,6 +157,24 @@ class Settings(BaseSettings):
     # classifier, so it never costs CPU.
     skip_model_on_spam: bool = True
 
+    # --- caveman compression -----------------------------------------------
+    # The recovery store for the compression endpoint. ":memory:" keeps
+    # recovery process-local, which suits a container with a read-only
+    # filesystem; point it at a writable path to make handles durable across
+    # restarts.
+    caveman_ccr_db: str = ":memory:"
+
+    # --- retired settings --------------------------------------------------
+    # These used to control the toxicity decision. The decision now follows
+    # the trait severity (see app/traits.py), so nothing reads them. They are
+    # still accepted, so an existing .env keeps loading, and startup warns
+    # when one is set - a knob that silently does nothing is worse than one
+    # that is gone.
+    flag_threshold: float | None = None
+    hard_labels: tuple[str, ...] | None = None
+    soft_labels: tuple[str, ...] | None = None
+    points_toxic_flag: int | None = None
+
     @field_validator(
         "hard_labels",
         "soft_labels",
@@ -140,6 +185,8 @@ class Settings(BaseSettings):
     @classmethod
     def _split_csv(cls, value: object) -> object:
         """Accept ``a,b,c`` as well as JSON arrays from the environment."""
+        if value is None:
+            return None
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -149,13 +196,49 @@ class Settings(BaseSettings):
             return tuple(part.strip() for part in stripped.split(",") if part.strip())
         return value
 
-    @property
-    def hard_label_set(self) -> frozenset[str]:
-        return frozenset(self.hard_labels)
+    @model_validator(mode="after")
+    def _check_thresholds(self) -> Settings:
+        """The thresholds have to describe a usable ladder.
+
+        A misconfigured threshold would silently reopen the gap this ladder
+        exists to close: a review threshold above the block threshold leaves
+        the review band unreachable, and a block threshold below it rejects a
+        message without a single trait to point at.
+        """
+        for name in (
+            "block_threshold",
+            "review_threshold",
+            "report_corroboration_threshold",
+        ):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1, got {value}")
+        if self.review_threshold > self.block_threshold:
+            raise ValueError(
+                "review_threshold must not be above block_threshold "
+                f"({self.review_threshold} > {self.block_threshold}); "
+                "otherwise the review band is unreachable"
+            )
+        return self
 
     @property
-    def soft_label_set(self) -> frozenset[str]:
-        return frozenset(self.soft_labels)
+    def retired_settings_used(self) -> list[str]:
+        """The retired settings that are still set in the environment.
+
+        They are accepted so the service starts, but they no longer steer the
+        decision, so the operator is told rather than left with a knob that
+        does nothing.
+        """
+        return [
+            name
+            for name in (
+                "flag_threshold",
+                "hard_labels",
+                "soft_labels",
+                "points_toxic_flag",
+            )
+            if name in self.model_fields_set and getattr(self, name) is not None
+        ]
 
     @property
     def using_default_api_key(self) -> bool:

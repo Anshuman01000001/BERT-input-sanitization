@@ -66,14 +66,21 @@ def build_scenarios() -> list[Scenario]:
         ),
         Scenario(
             name="Toxic message",
-            note="a soft category at 0.97: flagged for review, not blocked",
+            note="a trait at 0.99: rejected outright, not just flagged",
             requests=[
                 ModerateRequest(text="you are a disgusting idiot", player_id="carol"),
             ],
         ),
         Scenario(
+            name="Mild toxicity",
+            note="a trait at 0.67: held back from other players, still sent",
+            requests=[
+                ModerateRequest(text="go away nobody likes you", player_id="heidi"),
+            ],
+        ),
+        Scenario(
             name="Threatening message",
-            note="a hard category at 0.84: blocked outright",
+            note="a threat trait at 0.82: blocked outright",
             requests=[
                 ModerateRequest(
                     text="I will find you and break your legs", player_id="dave"
@@ -219,6 +226,8 @@ def print_response(request: ModerateRequest, response: ModerateResponse) -> None
     target = f" -> {request.target_id}" if request.target_id else ""
     print(f"    {request.player_id}{target}: {request.text!r}")
     print(f"      -> {ACTION_LABEL.get(response.action, response.action.upper())}")
+    if response.review:
+        print("         queued for human review")
 
     if response.reasons:
         print(f"         reasons: {', '.join(response.reasons)}")

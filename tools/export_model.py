@@ -249,9 +249,14 @@ def verify(
         )
         for name, threshold in (
             ("block", settings.block_threshold),
-            ("flag", settings.flag_threshold),
+            ("review", settings.review_threshold),
         ):
-            crossed = (float_probs >= threshold) != (int8_probs >= threshold)
+            # The decision follows the strongest trait, so that is what has
+            # to be compared: a label crossing the threshold on its own
+            # changes nothing unless it is the strongest one.
+            float_severity = np.max(float_probs, axis=-1)
+            int8_severity = np.max(int8_probs, axis=-1)
+            crossed = (float_severity >= threshold) != (int8_severity >= threshold)
             flips[name] = flips.get(name, 0) + int(np.count_nonzero(crossed))
 
     print(f"max |logit| difference, float ONNX vs PyTorch: {max_logit_diff:.6f}")
@@ -267,7 +272,7 @@ def verify(
     # The thresholds the service actually applies, not copies of them.
     for name, threshold in (
         ("block", settings.block_threshold),
-        ("flag", settings.flag_threshold),
+        ("review", settings.review_threshold),
     ):
         print(f"  {name} threshold {threshold:.2f}: {flips.get(name, 0)} label(s) flipped")
         if flips.get(name):

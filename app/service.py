@@ -24,11 +24,13 @@ from redis.exceptions import RedisError
 
 from app.config import Settings
 from app.harassment import HarassmentTracker, HarassmentVerdict, ReportVerdict
+from app.logging_config import RECURRING_ERRORS
 from app.model import ToxicityModel
 from app.normalize import NormalizedMessage, normalize
 from app.schemas import ModerateRequest, ModerateResponse
 from app.scoring import BehaviorScorer, Escalation
 from app.spam import SpamChecker, SpamVerdict
+from app.traits import assess
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +123,14 @@ class ModerationService:
         # prevented delivery. A "flag" verdict still lets the message reach
         # other players, so it has to be classified: a threat that also
         # carried a link must still be blocked.
-        if action == "shadow_mute" and settings.skip_model_on_spam:
+        if request.is_report:
+            # A report is not chat. Its text necessarily describes the
+            # behaviour being reported, so classifying it punishes the
+            # reporter for filing the report: "this player is toxic and
+            # harassing me" is itself toxic text. The spam and harassment
+            # checks are exempt for the same reason.
+            reasons.append("model_skipped")
+        elif action == "shadow_mute" and settings.skip_model_on_spam:
             reasons.append("model_skipped")
         else:
             try:
@@ -156,17 +165,25 @@ class ModerationService:
                     request.player_id, player_score
                 )
             except RedisError:
-                logger.warning("could not read the escalation state", exc_info=True)
+                if RECURRING_ERRORS.should_report("escalation"):
+                    logger.warning("could not read the escalation state", exc_info=True)
                 state_available = False
 
         action, reasons = self._apply_escalation(action, reasons, escalation)
+        # A flag is the only way a message reaches a human, so it is recorded
+        # explicitly as well. The escalation ladder can raise a player to
+        # "flag for review" while the message itself is held back from other
+        # players, and that combination still has to be queued: merging the
+        # two into one severity ordering would swallow the review.
+        review = action == "flag" or escalation.level in ("flag", "ban_review")
         if escalation.level == "mute" and state_available:
             try:
                 await self._scorer.note_mute(
                     request.player_id, escalation.mute_seconds or 0
                 )
             except RedisError:
-                logger.warning("could not record the mute tier", exc_info=True)
+                if RECURRING_ERRORS.should_report("mute-tier"):
+                    logger.warning("could not record the mute tier", exc_info=True)
                 state_available = False
 
         # --- Player reports -------------------------------------------------
@@ -182,6 +199,7 @@ class ModerationService:
         latency_ms = (time.perf_counter() - started) * 1000
         response = ModerateResponse(
             action=action,
+            review=review,
             reasons=reasons,
             scores={label: round(value, 4) for label, value in scores.items()},
             player_score=player_score,
@@ -211,30 +229,13 @@ class ModerationService:
     def _toxicity_decision(
         self, scores: dict[str, float]
     ) -> tuple[str, list[str], int]:
-        """Apply the per-category thresholds to the classifier output.
+        """Apply the trait thresholds to the classifier output.
 
-        Hard categories (threat, identity hate, severe toxicity) block at a
-        low threshold; soft categories (toxic, insult, obscene) only flag at a
-        high one, because gaming banter is common and mostly harmless.
+        Every trait counts: the severity is the strongest one the model
+        found, and it decides the action. See :mod:`app.traits`.
         """
-        settings = self._settings
-        reasons: list[str] = []
-        blocked = False
-        flagged = False
-
-        for label, score in scores.items():
-            if label in settings.hard_label_set and score >= settings.block_threshold:
-                reasons.append(f"{label}:{score:.2f}")
-                blocked = True
-            elif label in settings.soft_label_set and score >= settings.flag_threshold:
-                reasons.append(f"{label}:{score:.2f}")
-                flagged = True
-
-        if blocked:
-            return "block", reasons, settings.points_toxic_block
-        if flagged:
-            return "flag", reasons, settings.points_toxic_flag
-        return "allow", reasons, 0
+        verdict = assess(scores, self._settings)
+        return verdict.action, list(verdict.reasons), verdict.points
 
     def _apply_escalation(
         self, action: str, reasons: list[str], escalation: Escalation
@@ -264,7 +265,8 @@ class ModerationService:
                 return await self._scorer.apply(player_id, points)
             return await self._scorer.get(player_id)
         except RedisError:
-            logger.warning("could not update the behaviour score", exc_info=True)
+            if RECURRING_ERRORS.should_report("score"):
+                logger.warning("could not update the behaviour score", exc_info=True)
             return 0
 
     async def _handle_report(
@@ -286,7 +288,8 @@ class ModerationService:
         try:
             target_score = await self._scorer.get(request.target_id)
         except RedisError:
-            logger.warning("could not read the target's score", exc_info=True)
+            if RECURRING_ERRORS.should_report("target-score"):
+                logger.warning("could not read the target's score", exc_info=True)
             return None, None
 
         report, _ = await self._stateful(
@@ -306,7 +309,8 @@ class ModerationService:
                     request.target_id, report.points
                 )
         except RedisError:
-            logger.warning("could not apply the report points", exc_info=True)
+            if RECURRING_ERRORS.should_report("report-points"):
+                logger.warning("could not apply the report points", exc_info=True)
         return target_score, report.reason
 
     # --- infrastructure ----------------------------------------------------
@@ -316,10 +320,12 @@ class ModerationService:
         try:
             return await coro, True
         except RedisError:
-            logger.warning(
-                "redis unavailable; stateful moderation checks are disabled",
-                exc_info=True,
-            )
+            if RECURRING_ERRORS.should_report("service"):
+                logger.warning(
+                                    "redis unavailable; stateful moderation checks are disabled",
+                    exc_info=True,
+                )
+
             return default, False
 
     def _log_decision(

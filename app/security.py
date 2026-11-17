@@ -34,10 +34,15 @@ class SecurityMiddleware:
         app: ASGIApp,
         settings_provider: Callable[[], Settings],
         protected_paths: tuple[str, ...],
+        body_limit_provider: Callable[[str, Settings], int] | None = None,
     ) -> None:
         self._app = app
         self._settings_provider = settings_provider
         self._protected_paths = protected_paths
+        # Optional per-path body limit. The default cap is sized for a chat
+        # message; a route that legitimately carries whole files needs its
+        # own, and the cap still applies before any body is read.
+        self._body_limit_provider = body_limit_provider
         # Failed authentication attempts are counted here, locally: the
         # Redis-backed limiter only sees authenticated traffic, so without
         # this a brute-force attempt against the key would be unmetered.
@@ -51,7 +56,7 @@ class SecurityMiddleware:
         settings = self._settings_provider()
         headers = Headers(scope=scope)
 
-        if scope.get("path") in self._protected_paths and settings.require_api_key:
+        if self._is_protected(scope.get("path", "")) and settings.require_api_key:
             provided = headers.getlist("x-api-key")
             if len(provided) > 1:
                 # A proxy that picks a different duplicate than we do would
@@ -74,12 +79,23 @@ class SecurityMiddleware:
                     )
                     return
                 await self._send_json(
-                    send, 401, {"detail": "invalid or missing X-API-Key"}
+                    send,
+                    401,
+                    {
+                        "detail": (
+                            "invalid or missing X-API-Key header. Send the same "
+                            "value as the service's MOD_API_KEY, or start the "
+                            "service with MOD_REQUIRE_API_KEY=false for local testing."
+                        )
+                    },
                 )
                 return
 
         if scope.get("method") in ("POST", "PUT", "PATCH"):
-            body, too_large = await self._read_body(receive, settings.max_body_bytes)
+            limit = settings.max_body_bytes
+            if self._body_limit_provider is not None:
+                limit = self._body_limit_provider(scope.get("path", ""), settings)
+            body, too_large = await self._read_body(receive, limit)
             if too_large:
                 await self._send_json(
                     send, 413, {"detail": "request body too large"}
@@ -89,6 +105,17 @@ class SecurityMiddleware:
             return
 
         await self._app(scope, receive, send)
+
+    def _is_protected(self, path: str) -> bool:
+        """Whether a path needs the API key.
+
+        A protected path protects its sub-paths too, so a route like
+        ``/compress/{handle}`` cannot be reached by dropping the prefix.
+        """
+        return any(
+            path == protected or path.startswith(f"{protected}/")
+            for protected in self._protected_paths
+        )
 
     @staticmethod
     def _key_matches(candidate: str | None, expected: str) -> bool:
